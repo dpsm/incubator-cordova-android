@@ -18,6 +18,7 @@
 */
 package org.apache.cordova;
 
+import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.File;
@@ -228,7 +229,6 @@ public class FileTransfer extends Plugin {
         InputStream fileInputStream = getPathFromUri(file);
 
         HttpURLConnection conn = null;
-        DataOutputStream dos = null;
 
         int bytesRead, bytesAvailable, bufferSize;
         long totalBytes;
@@ -276,11 +276,11 @@ public class FileTransfer extends Plugin {
         conn.setRequestMethod("POST");
         conn.setRequestProperty("Connection", "Keep-Alive");
         conn.setRequestProperty("Content-Type", "multipart/form-data;boundary="+BOUNDRY);
-        
+
         // Handle the other headers
         try {
           JSONObject headers = params.getJSONObject("headers");
-          for (Iterator iter = headers.keys(); iter.hasNext();)
+          for (Iterator<?> iter = headers.keys(); iter.hasNext();)
           {
             String headerKey = iter.next().toString();
             conn.setRequestProperty(headerKey, headers.getString(headerKey));
@@ -288,7 +288,7 @@ public class FileTransfer extends Plugin {
         } catch (JSONException e1) {
           // No headers to be manipulated!
         }
-        
+
         // Set the cookies on the response
         String cookie = CookieManager.getInstance().getCookie(server);
         if (cookie != null) {
@@ -300,29 +300,47 @@ public class FileTransfer extends Plugin {
             conn.setChunkedStreamingMode(maxBufferSize);
         }
 
-        dos = new DataOutputStream( conn.getOutputStream() );
+        final ByteArrayOutputStream baos = new ByteArrayOutputStream();
+        final DataOutputStream daos = new DataOutputStream(baos);
 
         // Send any extra parameters
         try {
-            for (Iterator iter = params.keys(); iter.hasNext();) {
+            for (Iterator<?> iter = params.keys(); iter.hasNext();) {
                 Object key = iter.next();
                 if(key.toString() != "headers")
                 {
-                  dos.writeBytes(LINE_START + BOUNDRY + LINE_END);
-                  dos.writeBytes("Content-Disposition: form-data; name=\"" +  key.toString() + "\";");
-                  dos.writeBytes(LINE_END + LINE_END);
-                  dos.write(params.getString(key.toString()).getBytes());
-                  dos.writeBytes(LINE_END);
+                  daos.writeBytes(LINE_START + BOUNDRY + LINE_END);
+                  daos.writeBytes("Content-Disposition: form-data; name=\"" +  key.toString() + "\";");
+                  daos.writeBytes(LINE_END + LINE_END);
+                  daos.write(params.getString(key.toString()).getBytes());
+                  daos.writeBytes(LINE_END);
                 }
             }
         } catch (JSONException e) {
             Log.e(LOG_TAG, e.getMessage(), e);
         }
 
-        dos.writeBytes(LINE_START + BOUNDRY + LINE_END);
-        dos.writeBytes("Content-Disposition: form-data; name=\"" + fileKey + "\";" + " filename=\"" + fileName +"\"" + LINE_END);
-        dos.writeBytes("Content-Type: " + mimeType + LINE_END);
-        dos.writeBytes(LINE_END);
+        daos.writeBytes(LINE_START + BOUNDRY + LINE_END);
+        daos.writeBytes("Content-Disposition: form-data; name=\"" + fileKey + "\";" + " filename=\"" + fileName +"\"" + LINE_END);
+        daos.writeBytes("Content-Type: " + mimeType + LINE_END);
+        daos.writeBytes(LINE_END);
+
+        final byte[] part1 = baos.toByteArray();
+        baos.reset();
+
+        // send multipart form data necesssary after file data...
+        daos.writeBytes(LINE_END);
+        daos.writeBytes(LINE_START + BOUNDRY + LINE_START + LINE_END);
+        final byte[] part2 = baos.toByteArray();
+
+        // This is the best effort to calculate the Content-Length since
+        // InputStream.available() might NOT return the actual file size
+        // and We do NOT want to read the entire file to calculate its length.
+        final int length = part1.length + fileInputStream.available() + part2.length;
+        conn.setRequestProperty("Content-Length", String.valueOf(length));
+
+        final DataOutputStream outputStream = new DataOutputStream(conn.getOutputStream());
+        outputStream.write(part1);
 
         // create a buffer of maximum size
         bytesAvailable = fileInputStream.available();
@@ -335,21 +353,18 @@ public class FileTransfer extends Plugin {
 
         while (bytesRead > 0) {
             totalBytes += bytesRead;
-            result.setBytesSent(totalBytes);
-            dos.write(buffer, 0, bufferSize);
+            outputStream.write(buffer, 0, bytesRead);
             bytesAvailable = fileInputStream.available();
             bufferSize = Math.min(bytesAvailable, maxBufferSize);
             bytesRead = fileInputStream.read(buffer, 0, bufferSize);
         }
-
-        // send multipart form data necesssary after file data...
-        dos.writeBytes(LINE_END);
-        dos.writeBytes(LINE_START + BOUNDRY + LINE_START + LINE_END);
+        result.setBytesSent(totalBytes);
+        outputStream.write(part2);
 
         // close streams
         fileInputStream.close();
-        dos.flush();
-        dos.close();
+        outputStream.flush();
+        outputStream.close();
 
         //------------------ read the SERVER RESPONSE
         StringBuffer responseString = new StringBuffer("");
